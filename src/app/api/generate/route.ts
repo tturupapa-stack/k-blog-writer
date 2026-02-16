@@ -2,8 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
 const BLOG_PROMPT = `당신은 네이버 블로그 SEO 전문 작가입니다.
-아래 "참고 자료"를 반드시 읽고, 그 정보를 바탕으로 블로그 글을 작성하세요.
-참고 자료에 없는 내용은 추측하지 말고, "~라고 알려져 있어요" 등의 표현을 사용하세요.
+
+## 🚨 중요 규칙 (반드시 준수!)
+1. **오직 "참고 자료"의 정보만 사용하세요**
+   - 참고 자료에 없는 내용은 절대 작성하지 마세요
+   - 날짜, 수치, 사실 정보는 참고 자료의 것을 그대로 인용하세요
+   - 학습된 과거 데이터가 아닌, 제공된 최신 참고 자료만 기반으로 작성하세요
+   - 불확실한 정보는 "~라고 알려져 있어요" 등으로 표현하세요
+
+2. **참고 자료가 부족하면 솔직하게 말하세요**
+   - 정보가 부족하면 "현재 정보가 제한적이에요" 등으로 표현
+   - 추측으로 채우지 마세요
 
 ## 작성 규칙
 1. **제목** — 키워드 포함, 30자 이내, 3개 후보
@@ -40,26 +49,61 @@ const BLOG_PROMPT = `당신은 네이버 블로그 SEO 전문 작가입니다.
 async function searchWeb(query: string): Promise<string> {
   const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
   if (!BRAVE_API_KEY) {
+    console.error("[searchWeb] BRAVE_API_KEY not set");
     return "(검색 결과 없음 - API 키 미설정)";
   }
 
   try {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5&search_lang=ko&country=KR`;
+    // 최신 정보를 위해 연도 키워드 추가
+    const currentYear = new Date().getFullYear();
+    const enhancedQuery = `${query} ${currentYear} 최신`;
+    
+    // extra_snippets=true로 더 풍부한 내용 가져오기, count를 10으로 증가
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(enhancedQuery)}&count=10&search_lang=ko&country=KR&extra_snippets=true`;
+    
+    console.log("[searchWeb] Query:", enhancedQuery);
+    
     const res = await fetch(url, {
-      headers: { "X-Subscription-Token": BRAVE_API_KEY, Accept: "application/json" },
+      headers: { 
+        "X-Subscription-Token": BRAVE_API_KEY, 
+        Accept: "application/json" 
+      },
     });
-    if (!res.ok) return "(검색 실패)";
+    
+    if (!res.ok) {
+      console.error("[searchWeb] Brave API error:", res.status, res.statusText);
+      return "(검색 실패)";
+    }
+    
     const data = await res.json();
-    const results = (data.web?.results || []).slice(0, 5);
+    const results = (data.web?.results || []).slice(0, 10);
+    
+    console.log(`[searchWeb] Found ${results.length} results`);
+    
     if (results.length === 0) return "(검색 결과 없음)";
 
     return results
       .map(
-        (r: { title?: string; url?: string; description?: string }, i: number) =>
-          `[${i + 1}] ${r.title || ""}\n${r.description || ""}\nURL: ${r.url || ""}`
+        (r: { 
+          title?: string; 
+          url?: string; 
+          description?: string;
+          extra_snippets?: string[];
+        }, i: number) => {
+          let result = `[${i + 1}] ${r.title || ""}\n${r.description || ""}`;
+          
+          // extra_snippets가 있으면 추가 정보로 포함
+          if (r.extra_snippets && r.extra_snippets.length > 0) {
+            result += `\n추가 정보: ${r.extra_snippets.join(' ')}`;
+          }
+          
+          result += `\nURL: ${r.url || ""}`;
+          return result;
+        }
       )
       .join("\n\n");
-  } catch {
+  } catch (error) {
+    console.error("[searchWeb] Error:", error);
     return "(검색 중 오류 발생)";
   }
 }
@@ -97,8 +141,11 @@ export async function POST(request: NextRequest) {
     });
 
     // 2단계: 검색 결과를 참고해서 글 작성
+    console.log("[generate] Search results length:", searchResults.length);
+    console.log("[generate] Using model: gpt-4o-mini");
+    
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini", // gpt-4o → gpt-4o-mini (현재 사용 가능한 모델)
       messages: [
         { role: "system", content: BLOG_PROMPT },
         {
@@ -108,8 +155,8 @@ export async function POST(request: NextRequest) {
 ## 참고 자료 (웹 검색 결과)
 ${searchResults}
 
-위 참고 자료를 바탕으로 "${keyword.trim()}" 주제의 네이버 SEO 블로그 글을 작성해주세요.
-참고 자료의 정보를 활용하되, 자연스러운 블로그 글로 재구성하세요.`,
+🚨 중요: 위 참고 자료에 있는 정보만 사용해서 "${keyword.trim()}" 주제의 네이버 SEO 블로그 글을 작성해주세요.
+참고 자료에 없는 내용은 절대 추측하지 마세요. 날짜와 수치는 참고 자료의 것을 정확히 인용하세요.`,
         },
       ],
       temperature: 0.7,
